@@ -1,0 +1,5 @@
+BMI206-Env/
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+.DS_Store
