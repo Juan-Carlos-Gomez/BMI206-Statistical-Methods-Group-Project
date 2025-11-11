@@ -47,11 +47,11 @@ git push origin main
 
 
 
-## Objectives
+## Objectives **PLS add objectives from Assignment #2**
 - Reproduce a subset of analyses from the Sakaue *et al.* paper.  
+
 - Explore enhancer–gene link inference across tissues using statistical models.  
-- Evaluate disease-associated loci (e.g., rheumatoid arthritis, lupus) for enrichment in identified enhancer–gene pairs.  
-- Apply regression, correlation, and dimensionality reduction techniques from the course to validate or extend findings.  
+
 - Document challenges, methodological choices, and key lessons learned.
 
 ---
@@ -60,7 +60,6 @@ git push origin main
 Enhancer–gene maps are crucial for understanding how noncoding genetic variation influences gene regulation and disease.  
 Sakaue *et al.* combined **chromatin accessibility**, **gene expression**, and **GWAS summary statistics** to identify putative causal enhancer–gene relationships across tissues.  
 
-Our reanalysis focuses on a subset of tissues and aims to evaluate the **statistical robustness** of enhancer–gene associations using alternative modeling approaches.
 
 ---
 
@@ -68,9 +67,9 @@ Our reanalysis focuses on a subset of tissues and aims to evaluate the **statist
 We will use a combination of:
 - **Single-cell multiomics datasets** from the original publication (downloaded from GEO)
 - **Statistical modeling techniques** covered in BMI206:
-  - Linear regression and multiple regression  
-  - Correlation analysis and PCA  
-  - Hypothesis testing and permutation-based significance assessment
+  - ? 
+  - ?
+  - ?
 - **Tools:** Python (`pandas`, `scanpy`, `statsmodels`) and R (`tidyverse`, `ggplot2`, `Seurat`)
 
 ---
@@ -85,7 +84,7 @@ We will use a combination of:
 
 ## Presentation
 - **Due:** November 24–26, 2025  
-- **Format:** Oral presentation (one per group)  
+
 - **Evaluation:** Based on approach, interpretation, and participation during Q&A  
 
 ---
