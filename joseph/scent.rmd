@@ -1,0 +1,117 @@
+```{r}
+library(SCENT)
+library(Seurat)
+library(Signac)
+
+base <- "/media/chang/HDD-8/joseph/bmi206"
+
+genebed_loc <- file.path(base, "GeneBody_500kb_margin.bed")
+```
+
+## Load Inputs
+
+```{r}
+dataset <- "NeurIPS"
+seurat_obj <- readRDS(file.path(base, dataset, "seurat_neurips.rds"))
+
+atac <- GetAssayData(seurat_obj, assay = "ATAC", slot = "counts")
+dim(atac)
+inherits(atac, "sparseMatrix")
+
+mrna <- GetAssayData(seurat_obj, assay = "RNA", slot = "counts")
+dim(mrna)
+inherits(mrna, "sparseMatrix")
+
+meta <- data.frame(
+    cell = colnames(seurat_obj),
+    # percent.mito = seurat_obj$percent.mito,
+    log_nUMI = log1p(seurat_obj$nCount_RNA)
+    # sample = seurat_obj$Samplename,
+    # batch = seurat_obj$batch
+)
+
+covariates <- c("log_nUMI") # minimum
+# covariates <- c("log(nCount_RNA)","percent.mito")
+
+celltypes <- unique(seurat_obj$cell_type)
+
+# input_gene_peak <- "./RData/Data/qced_Tnk.G2P.txt"
+# output <- "./Output/test_output.txt"
+
+# options(stringsAsFactors = F)
+
+# gene_peak <- read.table(input_gene_peak)
+# colnames(gene_peak) <- c("gene","peak")
+
+cat(paste(shQuote(celltypes, type = "cmd"), collapse = ", "), "\n")
+```
+
+```{r}
+SCENT_obj <- CreateSCENTObj(rna = mrna, atac = atac, meta.data = meta,
+                            covariates = covariates, celltypes = celltypes)
+str(SCENT_obj)
+```
+
+```{r}
+SCENT_obj <- CreatePeakToGeneList(SCENT_obj, genebed = genebed_loc,
+                                  nbatch = 1000, tmpfile=file.path(base, "temporary_atac_peak.bed"),
+                                  intersectedfile=file.path(base, "temporary_atac_peak_intersected.bed.gz"))
+str(SCENT_obj)
+
+saveRDS(SCENT_obj, file = file.path(base, dataset, paste0("SCENT_", dataset, "_obj.rds")))
+```
+
+## SCENT Object
+
+```{r SCENT}
+# ##Using the SCENT Object:
+# SCENT_obj <- CreateSCENTObj(rna = mrna, atac = atac, meta.data = meta,
+#                             peak.info = gene_peak,
+#                             covariates = c("log(nCount_RNA)","percent.mito"), 
+#                             celltypes = "newCT")
+
+# ##Example Outputs of the SCENT Object
+# head(SCENT_obj@rna[1:10,1:2])
+# head(SCENT_obj@atac[1:10,1:2])
+# head(SCENT_obj@meta.data)
+# head(SCENT_obj@peak.info)
+# str(SCENT_obj)
+```
+
+## SCENT Algorithm: Obtain small list of gene-peak pairs.
+
+```{r gene_peak}
+# #Of the set of peak gene pairs: pick a set of pairs to test: 
+# #Example: (first 10 gene-peak pairs)
+# SCENT_obj@peak.info <- SCENT_obj@peak.info[1:10,]
+# head(SCENT_obj@peak.info)
+```
+## SCENT Algorithm: Options for Regression w/ Bootstrapping.
+
+```{r gene_peak}
+# #Run SCENT algorithm of Tnk cell type and use 6 cores for parallelization:
+
+
+# #Default: Poisson regression and Binarized ATAC counts
+# SCENT_obj_ver1 <- SCENT_algorithm(SCENT_obj, "Tnk", 6) 
+# # By default settings the above will perform parallelizations using Poisson regression and Binarized counts.
+
+# #Option 1: Poisson regression and Non-Binarized ATAC counts
+# SCENT_obj_ver2 <- SCENT_algorithm(SCENT_obj, "Tnk", 6, regr = "poisson", bin = FALSE)
+
+# #Option 2: Negative Binomial regression and Binarized ATAC counts
+# SCENT_obj_ver3 <- SCENT_algorithm(SCENT_obj, "Tnk", 6, regr = "negbin", bin = TRUE)
+
+# #Option 3: Negative Binomial regression and Non-Binarized ATAC counts
+# SCENT_obj_ver4 <- SCENT_algorithm(SCENT_obj, "Tnk", 6, regr = "negbin", bin = FALSE)
+
+```
+
+## Output of SCENT Algorithm
+
+```{r SCENT_algo}
+# head(SCENT_obj_ver1@SCENT.result)
+# head(SCENT_obj_ver2@SCENT.result)
+# head(SCENT_obj_ver3@SCENT.result)
+# head(SCENT_obj_ver4@SCENT.result)
+```

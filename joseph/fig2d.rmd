@@ -1,6 +1,7 @@
 ```{r}
 library(Seurat)
 library(Signac)
+library(ggplot2)
 
 library(rtracklayer)
 library(GenomicRanges)
@@ -193,9 +194,9 @@ saveRDS(gene_results_scent, file = file.path(base, dataset, "gene_phastcons_scen
 
 ## phastcons for ATAC peaks
 
-atac_peaks <- StringToGRanges(Features(seurat_obj[["ATAC"]]), sep = c(":", "-")) # every range has at least one ATAC peak in seurat object
-atac_peaks_by_gene <- make_atac_peaks_by_gene(atac_peaks, scent_gene_names)
-saveRDS(atac_peaks_by_gene, file = file.path(base, dataset, "atac_peaks_by_gene.rds"))
+# atac_peaks <- StringToGRanges(Features(seurat_obj[["ATAC"]]), sep = c(":", "-")) # every range has at least one ATAC peak in seurat object
+# atac_peaks_by_gene <- make_atac_peaks_by_gene(atac_peaks, scent_gene_names)
+# saveRDS(atac_peaks_by_gene, file = file.path(base, dataset, "atac_peaks_by_gene.rds"))
 
 atac_peaks_by_gene <- readRDS(file.path(base, dataset, "atac_peaks_by_gene.rds"))
 
@@ -204,6 +205,65 @@ gene_results_atac_list <- list()
 for (i in seq_along(scent_gene_names)) {gene_results_atac_list[[i]] <- get_gene_phastcons_atac(scent_gene_names[i], atac_peaks_by_gene)}
 gene_results_atac <- do.call(rbind, gene_results_atac_list)
 saveRDS(gene_results_atac, file = file.path(base, dataset, "gene_phastcons_atac.rds"))
+```
+
+# bootstrapping
+```{r}
+bootstrap_score <- function(delta_pc, n_boot = 100) {
+  set.seed(1)
+  boot_means <- replicate(n_boot, {mean(sample(delta_pc[!is.na(delta_pc)], size = sum(!is.na(delta_pc)), replace = TRUE))})
+  ci <- quantile(boot_means, probs = c(0.025, 0.975), na.rm = TRUE) # 95% CI
+  list(mean = mean(boot_means), ci_lower = ci[1], ci_upper = ci[2])
+}
+
+bootstraps_scent <- list()
+bootstraps_atac <- list()
+
+gene_pc_noncoding  <- readRDS(file.path(base, "gene_phastcons_cis.rds"))
+
+datasets <- c("Arthritis", "PBMC", "NeurIPS")
+
+all_scent_genes <- c()
+for (dataset in datasets) {
+  gene_pc_scent <- readRDS(file = file.path(base, dataset, "gene_phastcons_scent.rds"))
+  gene_pc_atac  <- readRDS(file = file.path(base, dataset, "gene_phastcons_atac.rds"))
+
+  delta_pc_scent <- gene_pc_scent$mean_scent - gene_pc_noncoding$mean_cis[match(gene_pc_scent$gene_name, gene_pc_noncoding$gene_name)]
+  bootstraps_scent[[dataset]] <- bootstrap_score(delta_pc_scent)
+  delta_pc_atac <- gene_pc_atac$mean_scent - gene_pc_noncoding$mean_cis[match(gene_pc_atac$gene_name, gene_pc_noncoding$gene_name)]
+  bootstraps_atac[[dataset]] <- bootstrap_score(delta_pc_atac)
+
+  all_scent_genes <- union(all_scent_genes, gene_pc_scent$gene_name)
+}
+
+gene_pc_exon <- readRDS(file.path(base, "gene_phastcons_exon.rds"))
+gene_pc_exon <- gene_pc_exon %>% filter(gene_name %in% all_scent_genes)
+delta_pc_exon <- gene_pc_exon$mean_exon - gene_pc_noncoding$mean_cis[match(gene_pc_exon$gene_id, gene_pc_noncoding$gene_id)]
+bootstrap_exon <- bootstrap_score(delta_pc_exon)
+```
+
+# plotting
+```{r}
+bootstrap_results <- data.frame(
+  Dataset = factor(c("Exons", "Arthritis tissue", "Arthritis tissue", "Public PBMC", "Public PBMC", "NeurIPS", "NeurIPS"), levels = c("Exons", "Arthritis tissue", "Public PBMC", "NeurIPS")),
+  Category = factor(c("Exonic regions", "SCENT", "All cis-ATAC peaks", "SCENT", "All cis-ATAC peaks", "SCENT", "All cis-ATAC peaks"), levels = c("Exonic regions", "SCENT", "All cis-ATAC peaks")),
+  Mean = c(bootstrap_exon$mean, bootstraps_scent[["Arthritis"]]$mean, bootstraps_atac[["Arthritis"]]$mean, bootstraps_scent[["PBMC"]]$mean, bootstraps_atac[["PBMC"]]$mean, bootstraps_scent[["NeurIPS"]]$mean, bootstraps_atac[["NeurIPS"]]$mean),
+  CI_Lower = c(bootstrap_exon$ci_lower, bootstraps_scent[["Arthritis"]]$ci_lower, bootstraps_atac[["Arthritis"]]$ci_lower, bootstraps_scent[["PBMC"]]$ci_lower, bootstraps_atac[["PBMC"]]$ci_lower, bootstraps_scent[["NeurIPS"]]$ci_lower, bootstraps_atac[["NeurIPS"]]$ci_lower),
+  CI_Upper = c(bootstrap_exon$ci_upper, bootstraps_scent[["Arthritis"]]$ci_upper, bootstraps_atac[["Arthritis"]]$ci_upper, bootstraps_scent[["PBMC"]]$ci_upper, bootstraps_atac[["PBMC"]]$ci_upper, bootstraps_scent[["NeurIPS"]]$ci_upper, bootstraps_atac[["NeurIPS"]]$ci_upper)
+)
+
+# Create the dot plot
+p <- ggplot(bootstrap_results, aes(x = Dataset, y = Mean, color = Category)) +
+  geom_point(size = 2, position = position_dodge(width = 0.25)) +
+  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0, position = position_dodge(width = 0.25)) +
+  labs(y = "∆phastCons score from all cis-regions") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, color = "black"), axis.text.y = element_text(color = "black"), axis.title.x = element_blank(), panel.grid = element_blank(), panel.border = element_blank(), axis.line = element_line(linewidth=0.2), axis.ticks = element_line(linewidth=0.2)) +
+  scale_color_manual(values = c("Exonic regions" = "#6c488c", "SCENT" = "#00b1a4", "All cis-ATAC peaks" = "#e6be6f")) +
+  ylim(-0.2, 0.4) +
+  theme(legend.title = element_blank(), legend.position = "top") +
+  geom_hline(yintercept = 0, color = "black", linewidth=0.2)
+ggsave(p, filename = file.path("bmi206/joseph/result.png"), width = 5, height = 4)
 ```
 
 # old code below
@@ -304,56 +364,4 @@ gene_results_atac_list <- list()
 for (i in seq_along(scent_gene_names)) {gene_results_atac_list[[i]] <- get_gene_phastcons_atac(scent_gene_names[i], atac_peaks_by_gene)}
 gene_results_atac <- do.call(rbind, gene_results_atac_list)
 saveRDS(gene_results_atac, file = file.path(base, dataset, "gene_phastcons_atac.rds"))
-```
-
-# bootstrapping and plotting
-
-```{r}
-bootstrap_score <- function(delta_pc, n_boot = 1000) {
-  set.seed(1)
-  boot_means <- replicate(n_boot, {mean(sample(delta_pc[!is.na(delta_pc)], size = sum(!is.na(delta_pc)), replace = TRUE))})
-  ci <- quantile(boot_means, probs = c(0.025, 0.975), na.rm = TRUE) # 95% CI
-  list(mean = mean(boot_means), ci_lower = ci[1], ci_upper = ci[2])
-}
-
-gene_pc_noncoding  <- readRDS(file.path(base, "gene_phastcons_cis.rds"))
-
-gene_pc_exon <- readRDS(file.path(base, "gene_phastcons_exon.rds"))
-
-dataset <- "Arthritis"
-arthritis_pc_scent <- readRDS(file = file.path(base, dataset, "gene_phastcons_scent.rds"))
-arthritis_pc_atac  <- readRDS(file = file.path(base, dataset, "gene_phastcons_atac.rds"))
-
-delta_pc_exon <- gene_results_exon$mean_exon - gene_results_noncoding$mean_cis[match(gene_results_exon$gene_id, gene_results_noncoding$gene_id)]
-bootstrap_exon <- bootstrap_score(delta_pc_exon, n_boot = 1000)
-
-# arthritis
-arthritis_delta_pc_scent <- gene_results_scent$mean_scent - gene_results_noncoding$mean_cis[match(gene_results_scent$gene_name, gene_results_noncoding$gene_name)]
-arthritis_bootstrap_scent <- bootstrap_score(delta_pc_scent, n_boot = 1000)
-arthritis_delta_pc_atac <- gene_results_atac$mean_scent - gene_results_noncoding$mean_cis[match(gene_results_atac$gene_name, gene_results_noncoding$gene_name)]
-arthritis_bootstrap_atac <- bootstrap_score(delta_pc_atac, n_boot = 1000)
-
-# Public PBMC
-
-# NeurIPS
-
-library(ggplot2)
-
-# Combine bootstrap results into a data frame for plotting
-bootstrap_results <- data.frame(
-  Dataset = factor(c("Exon", "Arthritis", "Arthritis"), levels = c("Exon", "Arthritis")),
-  Category = factor(c(NA, "SCENT", "ATAC"), levels = c(NA, "SCENT", "ATAC")),
-  Mean = c(bootstrap_exon$mean, arthritis_bootstrap_scent$mean, arthritis_bootstrap_atac$mean),
-  CI_Lower = c(bootstrap_exon$ci_lower, arthritis_bootstrap_scent$ci_lower, arthritis_bootstrap_atac$ci_lower),
-  CI_Upper = c(bootstrap_exon$ci_upper, arthritis_bootstrap_scent$ci_upper, arthritis_bootstrap_atac$ci_upper)
-)
-
-# Create the dot plot
-ggplot(bootstrap_results, aes(x = Dataset, y = Mean, color = Category)) +
-  geom_point(size = 3, position = position_dodge(width = 0.5)) +
-  geom_errorbar(aes(ymin = CI_Lower, ymax = CI_Upper), width = 0.2, position = position_dodge(width = 0.5)) +
-  labs(title = "Bootstrap Results by Dataset", x = "Dataset", y = "Mean Delta PhastCons Score") +
-  theme_minimal() +
-  ylim(-0.2, 0.4) +
-  theme(legend.title = element_blank())
 ```
