@@ -209,7 +209,7 @@ saveRDS(gene_results_atac, file = file.path(base, dataset, "gene_phastcons_atac.
 
 # bootstrapping
 ```{r}
-bootstrap_score <- function(delta_pc, n_boot = 100) {
+bootstrap_score <- function(delta_pc, n_boot = 10) {
   set.seed(1)
   boot_means <- replicate(n_boot, {mean(sample(delta_pc[!is.na(delta_pc)], size = sum(!is.na(delta_pc)), replace = TRUE))})
   ci <- quantile(boot_means, probs = c(0.025, 0.975), na.rm = TRUE) # 95% CI
@@ -224,6 +224,7 @@ gene_pc_noncoding  <- readRDS(file.path(base, "gene_phastcons_cis.rds"))
 datasets <- c("Arthritis", "PBMC", "NeurIPS")
 
 all_scent_genes <- c()
+scent_genes <- list()
 for (dataset in datasets) {
   gene_pc_scent <- readRDS(file = file.path(base, dataset, "gene_phastcons_scent.rds"))
   gene_pc_atac  <- readRDS(file = file.path(base, dataset, "gene_phastcons_atac.rds"))
@@ -233,11 +234,15 @@ for (dataset in datasets) {
   delta_pc_atac <- gene_pc_atac$mean_scent - gene_pc_noncoding$mean_cis[match(gene_pc_atac$gene_name, gene_pc_noncoding$gene_name)]
   bootstraps_atac[[dataset]] <- bootstrap_score(delta_pc_atac)
 
+  scent_genes[[dataset]] <- gene_pc_scent$gene_name
   all_scent_genes <- union(all_scent_genes, gene_pc_scent$gene_name)
 }
 
 gene_pc_exon <- readRDS(file.path(base, "gene_phastcons_exon.rds"))
 gene_pc_exon <- gene_pc_exon %>% filter(gene_name %in% all_scent_genes)
+# gene_pc_exon <- gene_pc_exon %>% filter(gene_name %in% scent_genes[["Arthritis"]])
+# gene_pc_exon <- gene_pc_exon %>% filter(gene_name %in% scent_genes[["PBMC"]])
+# gene_pc_exon <- gene_pc_exon %>% filter(gene_name %in% scent_genes[["NeurIPS"]])
 delta_pc_exon <- gene_pc_exon$mean_exon - gene_pc_noncoding$mean_cis[match(gene_pc_exon$gene_id, gene_pc_noncoding$gene_id)]
 bootstrap_exon <- bootstrap_score(delta_pc_exon)
 ```
@@ -260,10 +265,14 @@ p <- ggplot(bootstrap_results, aes(x = Dataset, y = Mean, color = Category)) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, color = "black"), axis.text.y = element_text(color = "black"), axis.title.x = element_blank(), panel.grid = element_blank(), panel.border = element_blank(), axis.line = element_line(linewidth=0.2), axis.ticks = element_line(linewidth=0.2)) +
   scale_color_manual(values = c("Exonic regions" = "#6c488c", "SCENT" = "#00b1a4", "All cis-ATAC peaks" = "#e6be6f")) +
-  ylim(-0.2, 0.4) +
+  # ylim(-0.2, 0.4) +
+  coord_cartesian(ylim = c(-0.2, 0.4)) +
   theme(legend.title = element_blank(), legend.position = "top") +
   geom_hline(yintercept = 0, color = "black", linewidth=0.2)
 ggsave(p, filename = file.path("bmi206/joseph/result.png"), width = 5, height = 4)
+
+bootstrap_results$CI_Lower
+bootstrap_results$CI_Upper
 ```
 
 # old code below
