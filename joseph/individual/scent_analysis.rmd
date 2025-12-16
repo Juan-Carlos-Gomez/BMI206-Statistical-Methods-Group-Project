@@ -1,0 +1,756 @@
+# load SCENT results
+```{r}
+library(ggplot2)
+library(reshape2)
+library(cluster)
+library(dplyr)
+
+base <- "/media/chang/HDD-8/joseph/bmi206/wangDev"
+plot_dir <- "/home/joseph/R/bmi206/joseph/plots/wang"
+
+celltypes <- c("Radial glia", "IPC-EN", "EN-Newborn", "EN-Immature", "EN-Mature")
+groups <- c("First_trimester", "Second_trimester", "Third_trimester", "Infancy", "Adolescence")
+
+celltypes_groups <- expand.grid(celltype = celltypes, group = groups, stringsAsFactors = FALSE)
+celltypes_groups[celltypes_groups$celltype %in% c("Radial glia", "IPC-EN") & celltypes_groups$group %in% c("Third_trimester", "Infancy", "Adolescence"), ] <- NA
+
+celltypes_groups[celltypes_groups$celltype %in% c("EN-Newborn", "EN-Immature") & celltypes_groups$group %in% c("Third_trimester", "Infancy", "Childhood", "Adolescence"), ] <- NA
+
+celltypes_groups <- na.omit(celltypes_groups)
+
+celltypes_groups <- celltypes_groups[order(match(celltypes_groups$group, groups), match(celltypes_groups$celltype, celltypes)), ]
+
+celltype_markers <- lapply(unique(celltypes_groups$celltype), function(celltype) {
+    data.frame(celltype = celltype, marker = read.csv(file.path(plot_dir, "markers", paste0("top_50_", celltype, "_markers.csv")))$gene)
+}) %>% bind_rows()
+
+group_markers <- lapply(unique(celltypes_groups$group), function(group) {
+    data.frame(group = group, marker = read.csv(file.path(plot_dir, "markers", paste0("top_50_", group, "_markers.csv")))$gene)
+}) %>% bind_rows()
+
+all_markers <- unique(c(celltype_markers$marker, group_markers$marker))
+
+# combine batches for each group and celltype
+for (group in groups) {
+    for (celltype in celltypes) {
+        files <- list.files(path = file.path(base, "scent_results"), pattern = paste(celltype, group, sep="_"), full.names = TRUE)
+        files <- files[grepl("\\d+\\.txt$", basename(files))]
+        if (length(files) > 0) {
+            combined_data <- do.call(rbind, lapply(files, read.table, header = TRUE))
+            output_file <- file.path(base, "scent_results", paste0("SCENTresult_", celltype, "_", group, ".txt"))
+            write.table(combined_data, file = output_file, row.names = FALSE, col.names = TRUE, quote = FALSE)
+            print(paste("Combined SCENT results for", celltype, group))
+        }
+    }
+}
+```
+
+```{r}
+# load all results into a list
+scent_results <- list()
+for (celltype in unique(celltypes_groups[, "celltype"])) {
+    print(celltype)
+    scent_results[[celltype]] <- list()
+    for (group in unique(celltypes_groups[celltypes_groups$celltype == celltype, "group"])) {
+        print(group)
+        scent_results[[celltype]][[group]] <- read.table(file.path(base, "scent_results", paste0("SCENTresult_", celltype, "_", group, ".txt")), header = TRUE)
+    }
+}
+
+scent_results <- do.call(rbind, lapply(names(scent_results), function(celltype) {
+    do.call(rbind, lapply(names(scent_results[[celltype]]), function(group) {
+        data <- scent_results[[celltype]][[group]]
+        data$celltype <- celltype
+        data$group <- group
+        # Ensure consistent column names
+        required_cols <- c("celltype", "group", "gene", "peak", "beta", "p")
+        missing_cols <- setdiff(required_cols, colnames(data))
+        data[missing_cols] <- NA
+        return(data[, required_cols])
+    }))
+}))
+
+# adult_results <- read.table(file.path(base, "scent_results/Brain_allqced_bootpkg_nopc_allCT.FDR0.10.txt"), header = TRUE)
+# adult_results <- adult_results[(adult_results$celltype == "EXCNEU") & (adult_results$gene %in% all_markers), ]
+# adult_results <- adult_results %>% mutate(group = "Adult", celltype = "EN-Mature") %>%
+#                         select(celltype, group, gene, peak, beta, p)
+# scent_results <- rbind(scent_results, adult_results)
+
+scent_results$fdr <- p.adjust(scent_results$p, method = "BH")
+
+groups <- c("First_trimester", "Second_trimester", "Third_trimester", "Infancy", "Adolescence")
+
+# Merge overlapping peaks
+library(GenomicRanges)
+peak_ranges <- GRanges(seqnames = "chr1", 
+                       ranges = IRanges(start = as.numeric(sub(".*-(\\d+)-\\d+$", "\\1", scent_results$peak)),
+                                        end = as.numeric(sub(".*-\\d+-(\\d+)$", "\\1", scent_results$peak))))
+merged_peaks <- reduce(peak_ranges)
+
+peak_map <- findOverlaps(peak_ranges, merged_peaks)
+scent_results$merged_peak <- as.character(merged_peaks[subjectHits(peak_map)])
+scent_results <- scent_results[order(scent_results$fdr), ] # remove duplicates, keeping lowest fdr
+scent_results <- scent_results[!duplicated(scent_results[, c("celltype", "group", "merged_peak")]), ]
+scent_results$peak_gene_pair <- paste(scent_results$merged_peak, scent_results$gene, sep = "_")
+
+scent_results_signif <- scent_results[scent_results$fdr < 0.05, ]
+
+head(scent_results_signif)
+
+scent_results_signif[scent_results_signif$gene == "BCL11B",]
+```
+
+# plot SCENT results summary (Figure 1A,D)
+```{r}
+peak_counts <- scent_results_signif %>%
+    group_by(celltype, group) %>%
+    summarise(num_peaks = n(), .groups = "drop")
+
+peak_counts$group <- factor(peak_counts$group, levels = groups)
+peak_counts$celltype <- factor(peak_counts$celltype, levels = celltypes)
+
+p <- ggplot(peak_counts, aes(x = group, y = num_peaks, fill = celltype)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    theme_minimal() +
+    labs(x = "Age Group",
+         y = "Number of Peaks (FDR < 0.05)",
+         fill = "Cell Type") +
+    theme_minimal(base_size = 16) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+            axis.text.y = element_text(size = 14),
+            axis.title = element_text(size = 16),
+            legend.text = element_text(size = 14),
+            legend.title = element_text(size = 16),
+            panel.grid = element_blank())
+
+bar_plot_file <- file.path(plot_dir, "num_peaks_bar_plot.jpg")
+ggsave(bar_plot_file, plot = p, width = 12, height = 6)
+
+dotplot_data <- scent_results_signif %>%
+    dplyr::select(peak_gene_pair, group, celltype, beta) %>%
+    mutate(group = factor(group, levels = groups),
+           celltype = factor(celltype, levels = celltypes))
+
+p <- ggplot(dotplot_data, aes(x = group, y = beta, fill = celltype)) +
+    geom_violin(alpha = 0.6) +
+    theme_minimal() +
+    labs(x = "Group",
+         y = "Beta Value (FDR < 0.05)",
+         fill = "Cell Type") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 14),
+            axis.text.y = element_text(size = 14),
+            axis.title = element_text(size = 16),
+            legend.text = element_text(size = 14),
+            legend.title = element_text(size = 16))
+
+dotplot_file <- file.path(plot_dir, "violinplot_betas_by_group_and_celltype.jpg")
+ggsave(dotplot_file, plot = p, width = 12, height = 6)
+```
+
+# bootstrapped Jaccard index (Figure 1B-C)
+```{r}
+jaccard_index <- function(set1, set2) {
+    intersection <- length(intersect(set1, set2))
+    union <- length(union(set1, set2))
+    if (union == 0) {
+        return(0)
+    } else {
+        return(intersection / union)
+    }
+}
+
+scent_results_signif_mature <- scent_results_signif[scent_results_signif$celltype == "EN-Mature", ]
+scent_results_signif_t1 <- scent_results_signif[scent_results_signif$group == "First_trimester", ]
+scent_results_signif_t2 <- scent_results_signif[scent_results_signif$group == "Second_trimester", ]
+
+peak_gene_pairs_mature_refgroup <- scent_results_signif_mature$peak_gene_pair[scent_results_signif_mature$group == "Adolescence"]
+peak_gene_pairs_t1_refgroup <- scent_results_signif_t1$peak_gene_pair[scent_results_signif_t1$celltype == "EN-Mature"]
+peak_gene_pairs_t2_refgroup <- scent_results_signif_t2$peak_gene_pair[scent_results_signif_t2$celltype == "EN-Mature"]
+
+group_jac_ind <- data.frame(group = groups, jaccard_index = NA)
+t1_jac_ind <- data.frame(celltype = celltypes, jaccard_index = NA)
+t2_jac_ind <- data.frame(celltype = celltypes, jaccard_index = NA)
+
+set.seed(123)
+bootstrap_jaccard <- function(ref_set, comp_set, n = 1000) {
+    bootstrapped_indices <- replicate(n, sample(seq_along(ref_set), length(ref_set), replace = TRUE))
+    bootstrapped_jaccard <- apply(bootstrapped_indices, 2, function(indices) {
+        jaccard_index(ref_set[indices], comp_set)
+    })
+    return(bootstrapped_jaccard)
+}
+
+for (group in groups) {
+    scent_results_signif_mature_group <- scent_results_signif_mature[scent_results_signif_mature$group == group, ]
+    peak_gene_pairs_group <- scent_results_signif_mature_group$peak_gene_pair
+    bootstrapped_jaccard_values <- bootstrap_jaccard(peak_gene_pairs_mature_refgroup, peak_gene_pairs_group)
+    group_jac_ind$jaccard_index[group_jac_ind$group == group] <- mean(bootstrapped_jaccard_values)
+    group_jac_ind$ci_lower[group_jac_ind$group == group] <- quantile(bootstrapped_jaccard_values, 0.01)
+    group_jac_ind$ci_upper[group_jac_ind$group == group] <- quantile(bootstrapped_jaccard_values, 0.99)
+}
+
+for (celltype in celltypes) {
+    scent_results_signif_t1_celltype <- scent_results_signif_t1[scent_results_signif_t1$celltype == celltype, ]
+    peak_gene_pairs_celltype <- scent_results_signif_t1_celltype$peak_gene_pair
+    bootstrapped_jaccard_values <- bootstrap_jaccard(peak_gene_pairs_t1_refgroup, peak_gene_pairs_celltype)
+    t1_jac_ind$jaccard_index[t1_jac_ind$celltype == celltype] <- mean(bootstrapped_jaccard_values)
+    t1_jac_ind$ci_lower[t1_jac_ind$celltype == celltype] <- quantile(bootstrapped_jaccard_values, 0.005)
+    t1_jac_ind$ci_upper[t1_jac_ind$celltype == celltype] <- quantile(bootstrapped_jaccard_values, 0.995)
+
+    scent_results_signif_t2_celltype <- scent_results_signif_t2[scent_results_signif_t2$celltype == celltype, ]
+    peak_gene_pairs_celltype <- scent_results_signif_t2_celltype$peak_gene_pair
+    bootstrapped_jaccard_values <- bootstrap_jaccard(peak_gene_pairs_t2_refgroup, peak_gene_pairs_celltype)
+    t2_jac_ind$jaccard_index[t2_jac_ind$celltype == celltype] <- mean(bootstrapped_jaccard_values)
+    t2_jac_ind$ci_lower[t2_jac_ind$celltype == celltype] <- quantile(bootstrapped_jaccard_values, 0.005)
+    t2_jac_ind$ci_upper[t2_jac_ind$celltype == celltype] <- quantile(bootstrapped_jaccard_values, 0.995)
+}
+
+plot_jaccard_index <- function(jaccard_data, output_file, x = "group") {
+    if (x == "group") {
+        jaccard_data$group <- factor(jaccard_data$group, levels = groups)
+        x_label <- "Group"
+    } else if (x == "celltype") {
+        jaccard_data$celltype <- factor(jaccard_data$celltype, levels = celltypes)
+        x_label <- "Cell Type"
+    } else {
+        stop("Invalid x value. Choose either 'group' or 'celltype'.")
+    }
+
+    if (x == "group") {
+        jaccard_data[,-1] <- jaccard_data[,-1]/jaccard_data$jaccard_index[jaccard_data$group == "Adolescence"]
+        jaccard_data$ci_lower[jaccard_data$group == "Adolescence"] <- NA
+        jaccard_data$ci_upper[jaccard_data$group == "Adolescence"] <- NA
+    } else {
+        jaccard_data[,-1] <- jaccard_data[,-1]/jaccard_data$jaccard_index[jaccard_data$celltype == "EN-Mature"]
+        jaccard_data$ci_lower[jaccard_data$celltype == "EN-Mature"] <- NA
+        jaccard_data$ci_upper[jaccard_data$celltype == "EN-Mature"] <- NA
+    }
+    
+    p <- ggplot(jaccard_data, aes_string(x = x, y = "jaccard_index", fill = x)) +
+        geom_bar(stat = "identity", position = "dodge") +
+        geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2, position = position_dodge(0.9)) +
+        theme_minimal() +
+        # scale_fill_brewer(palette = "Set2") +
+        labs(x = x_label,
+             y = "Jaccard index",
+             fill = x_label) +
+        theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 14),
+              axis.text.y = element_text(size = 14),
+              axis.title = element_text(size = 16),
+              legend.text = element_text(size = 14),
+              legend.title = element_text(size = 16)) +
+        annotate("text", x = 1.5, y = 0.3, label = "ns", size = 5) +
+        annotate("segment", x = 1, xend = 2, y = 0.25, yend = 0.25, color = "black") +
+        annotate("text", x = 2.5, y = 0.55, label = "p < 0.01", size = 5) +
+        annotate("segment", x = 2, xend = 3, y = 0.5, yend = 0.5, color = "black") +
+        annotate("text", x = 3.5, y = 0.75, label = "p < 0.01", size = 5) +
+        annotate("segment", x = 3, xend = 4, y = 0.7, yend = 0.7, color = "black")
+    
+    ggsave(output_file, plot = p, width = 12, height = 4)
+}
+
+plot_jaccard_index(group_jac_ind, file.path(plot_dir, "jaccard_index_bootstrap.jpg"), x = "group")
+plot_jaccard_index(t2_jac_ind, file.path(plot_dir, "jaccard_index_t2_bootstrap.jpg"), x = "celltype")
+
+# # spearman correlation
+# # permutation test: scramble peak-gene pairs across celltypes
+# # regress out number of cells
+```
+
+# linear regression of effect size onto cell type (Figure 1E, right)
+```{r}
+scent_results_signif_query <- scent_results_signif[scent_results_signif$group == "Second_trimester", ]
+scent_results_signif_ref <- scent_results_signif[scent_results_signif$celltype == "EN-Mature" & 
+                                                       scent_results_signif$group == "Second_trimester" &
+                                                       scent_results_signif$beta > 0, ]                                                      
+
+beta_matrix <- data.frame(peak_gene_pair = scent_results_signif_ref$peak_gene_pair)
+for (celltype in celltypes) {
+    # beta_matrix[[celltype]] <- abs(scent_results_signif_query$beta[match(beta_matrix$peak_gene_pair,
+    #                                                     scent_results_signif_query$peak_gene_pair[scent_results_signif_query$celltype == celltype])])
+    beta_matrix[[celltype]] <- scent_results_signif_query$beta[match(beta_matrix$peak_gene_pair,
+                                                        scent_results_signif_query$peak_gene_pair[scent_results_signif_query$celltype == celltype])]                                                        
+}
+
+beta_matrix[is.na(beta_matrix)] <- 0
+rownames(beta_matrix) <- beta_matrix$peak_gene_pair
+beta_matrix$peak_gene_pair <- NULL
+beta_matrix <- sweep(beta_matrix, 1, rowMeans(beta_matrix), FUN = "-")
+beta_matrix <- beta_matrix * sign(beta_matrix[,"EN-Mature"])
+
+beta_matrix <- beta_matrix[, !colnames(beta_matrix) %in% "EN-Mature"]
+
+# linear regression for each row of beta_matrix
+linear_regression_slope <- apply(beta_matrix, 1, function(row) {
+    group_numeric <- as.numeric(factor(colnames(beta_matrix), levels = celltypes))
+    lm_model <- lm(row ~ group_numeric)
+    return(coef(lm_model)[2])  # Extract the slope
+})
+
+p <- ggplot(data.frame(slope = linear_regression_slope), aes(x = slope)) +
+    geom_histogram(bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+    labs(title = "Distribution of Linear Regression Slopes",
+         x = "Slope",
+         y = "Frequency") +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5))
+ggsave(file.path(plot_dir, "linear_regression_slopes_histogram.jpg"), plot = p, width = 8, height = 6)
+
+set.seed(123)
+n_iterations <- 1000
+bootstrap_slopes <- numeric(n_iterations)
+
+for (i in 1:n_iterations) {
+    print(i)
+    boot_sample <- beta_matrix[sample(1:nrow(beta_matrix), replace = TRUE), ]
+
+    boot_long <- boot_sample %>%
+        tidyr::gather(key = "celltype", value = "beta") %>%
+        mutate(group_numeric = as.numeric(factor(celltype, levels = celltypes)))
+
+    lm_model <- lm(beta ~ group_numeric, data = boot_long)
+    bootstrap_slopes[i] <- coef(lm_model)[2]
+}
+
+bootstrap_summary <- data.frame(
+    mean_slope = mean(bootstrap_slopes),
+    lower_ci = quantile(bootstrap_slopes, 0.025),
+    upper_ci = quantile(bootstrap_slopes, 0.975)
+)
+
+print(bootstrap_summary)
+
+p <- ggplot(data.frame(slope = bootstrap_slopes), aes(x = slope)) +
+    geom_histogram(bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+    geom_vline(xintercept = 0, color = "black", linetype = "dashed", size = 0.8) +
+    labs(x = "Slope", y = "Number of bootstraps") +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    theme(panel.grid = element_blank())
+
+bootstrap_hist_file <- file.path(plot_dir, "bootstrap_slopes_histogram.jpg")
+ggsave(bootstrap_hist_file, plot = p, width = 8, height = 4)
+```
+
+# heatmap of beta matrix (Figure 1E, left)
+```{r}
+#  hierarchical clustering on the beta matrix
+dist_matrix <- dist(beta_matrix)
+hclust_fit <- hclust(dist_matrix, method = "ward.D2")
+
+library(pheatmap)
+
+beta_matrix_ordered <- beta_matrix[hclust_fit$order, ]
+beta_matrix_ordered$cluster <- NULL
+
+dim(beta_matrix_ordered)
+
+heatmap_file <- file.path(plot_dir, "beta_matrix_heatmap.jpg")
+pheatmap(beta_matrix_ordered, 
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE, 
+         color = scales::gradient_n_pal(c("blue", "white", "red"))(seq(0, 1, length.out = 100)),
+         fontsize = 12,
+         show_rownames = FALSE,
+         filename = heatmap_file,
+         legend = TRUE,
+         legend_labels = "Beta Value",
+         width = 15)
+
+```
+
+# OLD ANALYSIS BELOW
+```{r}
+num_clusters <- 6
+beta_matrix$cluster <- cutree(hclust_fit, k = num_clusters)
+
+head(beta_matrix)
+
+cluster_centroids <- beta_matrix %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::summarise(across(everything(), mean))
+
+cluster_centroids_long <- cluster_centroids %>%
+    tidyr::gather(key = "group", value = "beta", -cluster)
+
+cluster_centroids_long$group <- factor(cluster_centroids_long$group, levels = groups)
+p <- ggplot(cluster_centroids_long, aes(x = group, y = beta, color = factor(cluster), group = cluster)) +
+    geom_line(size = 1) +
+    geom_point(size = 2) +
+    scale_color_viridis_d(name = "Cluster") +
+    theme_minimal() +
+    labs(title = "Cluster Centroids of Beta Trajectories", x = "Group", y = "Beta") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text.y = element_text(size = 12),
+          plot.title = element_text(hjust = 0.5))
+    # geom_line(data = beta_matrix_long, aes(x = group, y = beta, group = peak_gene_pair, color=factor(cluster)), 
+    #           color = "gray", size = 0.3, alpha = 0.5, inherit.aes = FALSE) +
+    # geom_line(size = 1) +
+    # geom_point(size = 2)
+
+centroid_plot_file <- file.path(plot_dir, "cluster_centroids_beta_trajectories_colored.jpg")
+ggsave(centroid_plot_file, plot = p, width = 8, height = 6)
+
+beta_matrix_long <- beta_matrix %>%
+    tidyr::gather(key = "group", value = "beta", -peak_gene_pair)
+
+p <- ggplot(beta_matrix_long, aes(x = group, y = beta)) +
+    geom_point(alpha = 0.5) +
+    theme_minimal() +
+    labs(title = "Beta Values Across Groups",
+         x = "Group",
+         y = "Beta Value") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+beta_lines_plot_file <- file.path(plot_dir, "beta_values_dot_plot.jpg")
+ggsave(beta_lines_plot_file, plot = p, width = 8, height = 6)
+```
+
+```{r}
+set.seed(123)
+n_iterations <- 100
+spearman_correlations <- numeric(n_iterations)
+slopes <- numeric(n_iterations)
+
+for (i in 1:n_iterations) {
+    boot_sample <- beta_matrix[sample(1:nrow(beta_matrix), replace = TRUE), ]
+    
+    boot_long <- boot_sample %>%
+        tidyr::gather(key = "group", value = "beta", -peak_gene_pair) %>%
+        mutate(group_numeric = as.numeric(factor(group, levels = groups)))
+    
+    spearman_correlations[i] <- cor(boot_long$group_numeric, boot_long$beta, method = "spearman")
+
+    lm_model <- lm(beta ~ group_numeric, data = boot_long)
+    slopes[i] <- coef(lm_model)[2]
+}
+
+cor_summary <- data.frame(
+    mean_correlation = mean(spearman_correlations),
+    lower_ci = quantile(spearman_correlations, 0.025),
+    upper_ci = quantile(spearman_correlations, 0.975)
+)
+
+slopes_summary <- data.frame(
+    mean_slope = mean(slopes),
+    lower_ci = quantile(slopes, 0.025),
+    upper_ci = quantile(slopes, 0.975)
+)
+
+print(cor_summary)
+print(slopes_summary)
+
+p <- ggplot(data.frame(correlation = spearman_correlations), aes(x = correlation)) +
+    geom_histogram(bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+    labs(title = "Bootstrap Distribution of Spearman Correlations",
+         x = "Spearman Correlation",
+         y = "Frequency") +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5))
+
+spearman_hist_file <- file.path(plot_dir, "spearman_correlation_histogram.jpg")
+ggsave(spearman_hist_file, plot = p, width = 8, height = 6)
+
+```
+
+```{r}
+jaccard_values <- list()
+groups <- c("First_trimester", "Second_trimester", "Third_trimester", "Infancy", "Adolescence")
+for (group in groups) {
+    scent_results_signif_mature_group <- scent_results_signif_mature[scent_results_signif_mature$group == group, ]
+    peak_gene_pairs_group <- scent_results_signif_mature_group$peak_gene_pair
+    jaccard_values[[group]] <- jaccard_index(peak_gene_pairs_mature_refgroup, peak_gene_pairs_group)
+}
+
+jaccard_values_df <- data.frame(group = names(jaccard_values), jaccard_index = unlist(jaccard_values))
+jaccard_values_df$group <- factor(jaccard_values_df$group, levels = groups)
+
+jaccard_values_df$group_numeric <- as.numeric(jaccard_values_df$group)
+jaccard_model <- lm(jaccard_index ~ group_numeric, data = jaccard_values_df)
+# jaccard_model <- lm(jaccard_index ~ group_numeric + num_cells, data = jaccard_values_df)
+true_slope <- coef(jaccard_model)[2]
+
+null_slopes <- c()
+for (b in 1:500) {
+    scent_results_signif_mature_permuted <- scent_results_signif_mature
+    scent_results_signif_mature_permuted$group <- sample(scent_results_signif_mature_permuted$group, size = nrow(scent_results_signif_mature_permuted), replace = FALSE)
+
+    jaccard_values <- list()
+    for (group in groups) {
+        scent_results_signif_mature_permuted_group <- scent_results_signif_mature_permuted[scent_results_signif_mature_permuted$group == group, ]
+        peak_gene_pairs_group <- scent_results_signif_mature_permuted_group$peak_gene_pair
+        jaccard_values[[group]] <- jaccard_index(peak_gene_pairs_mature_refgroup, peak_gene_pairs_group)
+    }
+
+    jaccard_values_df <- data.frame(group = names(jaccard_values), jaccard_index = unlist(jaccard_values))
+    jaccard_values_df$group <- factor(jaccard_values_df$group, levels = groups)
+
+    jaccard_values_df$group_numeric <- as.numeric(jaccard_values_df$group)
+    jaccard_model <- lm(jaccard_index ~ group_numeric, data = jaccard_values_df)
+    # jaccard_model <- lm(jaccard_index ~ group_numeric + num_cells, data = jaccard_values_df)
+    null_slopes <- c(null_slopes, coef(jaccard_model)[2])
+}
+
+null_slopes_df <- data.frame(slope = null_slopes)
+p <- ggplot(null_slopes_df, aes(x = slope)) +
+    geom_histogram(bins = 30, fill = "lightblue", color = "black", alpha = 0.7) +
+    geom_vline(xintercept = true_slope, color = "red", linetype = "dashed", size = 1) +
+    labs(title = "Histogram of Null Slopes", 
+         x = "Slope", 
+         y = "Frequency") +
+    theme_minimal(base_size = 14) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    annotate("text", x = true_slope, y = max(table(cut(null_slopes, breaks = 30))) * 0.9, 
+             label = "True Slope", color = "red", hjust = -0.1)
+
+histogram_file <- file.path(plot_dir, "null_slopes_histogram.jpg")
+ggsave(histogram_file, plot = p, width = 8, height = 6)
+
+p <- ggplot(jaccard_values_df, aes(x = group, y = jaccard_index)) +
+    geom_point(size = 3, color = "blue") +
+    geom_smooth(aes(x = group_numeric, y = jaccard_index), method = "lm", color = "red", se = FALSE) +
+    theme_minimal() +
+    labs(title = "Dotplot of Jaccard Index Across Groups",
+         x = "Group",
+         y = "Jaccard Index") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    ylim(0, 1)
+dotplot_file <- file.path(plot_dir, "jaccard_index_dotplot_permuted.jpg")
+ggsave(dotplot_file, plot = p, width = 8, height = 6)
+```
+
+```{r}
+# changes in peaks for transcription factors CTIP2 and SATB2
+plot_gene_beta_values <- function(gene, groups, celltypes, plot_dir, x="group") {
+
+    gene_data <- scent_results_signif[scent_results_signif$gene == gene & 
+                                      scent_results_signif$celltype %in% celltypes &
+                                      scent_results_signif$group %in% groups,]                            
+    
+    dot_plot_data <- gene_data %>%
+        dplyr::select(peak_gene_pair, celltype, group, beta, fdr)
+    dot_plot_data$group <- factor(dot_plot_data$group, levels = groups)
+    dot_plot_data$celltypes <- factor(dot_plot_data$celltype, levels = celltypes)
+    
+    p <- ggplot(dot_plot_data, aes_string(x = x, y = "beta", group = "peak_gene_pair", size = "-log10(fdr)")) +
+        geom_hline(yintercept = 0, linetype = "solid", color = "black", alpha = 0.7) +
+        geom_point(aes(color = if (length(celltypes) > 1) "celltype" else NULL), alpha = 0.6) +
+        scale_color_brewer(palette = "Set1") +
+        theme_minimal() +
+        labs(title = paste(gene, if (length(celltypes) == 1) celltypes else "", if (length(groups) == 1) groups else ""),
+             x = if (x == "group") "Group" else "Cell Type",
+             y = "Beta Value",
+             color = if (x == "group" & length(celltypes) > 1) "Cell Type" else NULL,
+             size = "-log10(FDR)") +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+        scale_x_discrete(limits = if (x == "group") groups else celltypes)
+
+    if (length(celltypes) == 1 | length(groups) == 1) {p <- p + geom_line(aes(group = peak_gene_pair), alpha = 0.4, lwd = 0.5)}
+    
+    dot_plot_file <- file.path(plot_dir, paste0(tolower(gene), "_dot_plot_beta_values.jpg"))
+    ggsave(dot_plot_file, plot = p, width = 8, height = 6)
+}
+
+plot_gene_beta_values("TBR1", groups, c("EN-Mature"), plot_dir, x="group")
+plot_gene_beta_values("BCL11B", groups, c("EN-Mature"), plot_dir, x="group")
+plot_gene_beta_values("SATB2", groups, c("EN-Mature"), plot_dir, x="group")
+
+plot_gene_beta_values("SATB2", c("First_trimester"), celltypes, plot_dir, x="celltype")
+plot_gene_beta_values("SATB2", c("Second_trimester"), celltypes, plot_dir, x="celltype")
+
+plot_gene_beta_values("TBR1", c("First_trimester"), celltypes, plot_dir, x="celltype")
+plot_gene_beta_values("TBR1", c("Second_trimester"), celltypes, plot_dir, x="celltype")
+
+plot_gene_beta_values("BCL11B", c("Second_trimester"), celltypes, plot_dir, x="celltype")
+
+plot_gene_beta_values("NEUROD2", c("Second_trimester"), celltypes, plot_dir, x="celltype")
+```
+
+
+```{r}
+# study peaks which cross from positive to negative beta
+scent_results_signif_t2 <- scent_results_signif[scent_results_signif$group == "Second_trimester", ]
+# Identify peak_gene_pairs with positive beta in one cell type and negative beta in another
+
+crossing_peak_gene_pairs <- scent_results_signif_t2 %>%
+    dplyr::select(peak_gene_pair, celltype, beta) %>%
+    tidyr::spread(key = celltype, value = beta, fill = NA) %>%
+    dplyr::filter(if_any(-1, ~ . > 0) & if_any(-1, ~ . < 0))
+
+crossing_peak_gene_pairs[is.na(crossing_peak_gene_pairs)] <- 0
+
+crossing_long <- crossing_peak_gene_pairs %>%
+    tidyr::gather(key = "celltype", value = "beta", -peak_gene_pair)
+
+p <- ggplot(crossing_long, aes(x = celltype, y = beta, group = peak_gene_pair)) +
+    geom_line(alpha = 0.5) +
+    geom_point(size = 1) +
+    theme_minimal() +
+    labs(title = "Beta Values for Crossing Peak-Gene Pairs",
+            x = "Cell Type",
+            y = "Beta Value") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+crossing_plot_file <- file.path(plot_dir, "crossing_peak_gene_pairs_beta_values.jpg")
+ggsave(crossing_plot_file, plot = p, width = 8, height = 6)
+```
+
+```{r}
+# compute shared peak-gene pairs and Jaccard index across groups/celltypes
+compute_shared_pairs <- function(result, group.by) {
+    if (group.by == "celltype") {
+        unique_groups <- unique(celltypes_groups$celltype)
+    } else if (group.by == "group") {
+        unique_groups <- unique(celltypes_groups$group)
+    } else if (group.by == "celltypes_groups") {
+        unique_groups <- paste(celltypes_groups$celltype, celltypes_groups$group, sep = "_")
+    } else {
+        stop("Invalid group.by value. Choose from 'celltype', 'group', or 'celltypes_groups'.")
+    }
+
+    shared_peaks_matrix <- matrix(0, nrow = length(unique_groups), ncol = length(unique_groups))
+    jaccard_matrix <- matrix(0, nrow = length(unique_groups), ncol = length(unique_groups))
+
+    rownames(shared_peaks_matrix) <- colnames(shared_peaks_matrix) <- unique_groups
+    rownames(jaccard_matrix) <- colnames(jaccard_matrix) <- unique_groups
+
+    for (i in 1:length(unique_groups)) {
+        for (j in 1:length(unique_groups)) {
+            if (group.by == "celltype") {
+                peaks_i <- scent_results_signif[scent_results_signif$celltype == unique_groups[i], "peak_gene_pair"]
+                peaks_j <- scent_results_signif[scent_results_signif$celltype == unique_groups[j], "peak_gene_pair"]
+            } else if (group.by == "group") {
+                peaks_i <- scent_results_signif[scent_results_signif$group == unique_groups[i], "peak_gene_pair"]
+                peaks_j <- scent_results_signif[scent_results_signif$group == unique_groups[j], "peak_gene_pair"]
+            } else if (group.by == "celltypes_groups") {
+                celltype_group_i <- strsplit(unique_groups[i], "_")[[1]]
+                celltype_group_j <- strsplit(unique_groups[j], "_")[[1]]
+                peaks_i <- scent_results_signif[scent_results_signif$celltype == celltype_group_i[1] & 
+                                                   scent_results_signif$group == celltype_group_i[2], "peak_gene_pair"]
+                peaks_j <- scent_results_signif[scent_results_signif$celltype == celltype_group_j[1] & 
+                                                   scent_results_signif$group == celltype_group_j[2], "peak_gene_pair"]
+            }
+
+            shared_peaks <- intersect(peaks_i, peaks_j)
+            shared_peaks_matrix[i, j] <- length(shared_peaks)
+            jaccard_matrix[i, j] <- length(shared_peaks) / length(union(peaks_i, peaks_j))
+        }
+    }
+
+    return(list(shared_peaks_matrix = shared_peaks_matrix, jaccard_matrix = jaccard_matrix))
+}
+```
+
+# shared peak gene pairs across groups
+```{r}
+shared_by_celltype <- compute_shared_pairs(scent_results_signif_df, group.by = "celltype")
+shared_by_groups <- compute_shared_pairs(scent_results_signif_df, group.by = "group")
+heatmap_data <- compute_shared_pairs(scent_results_signif_df, group.by = "celltypes_groups")
+
+heatmap_data <- melt(shared_peaks_matrix)
+colnames(heatmap_data) <- c("CellGroup1", "CellGroup2", "SharedPeaks")
+heatmap_data$JaccardIndex <- melt(jaccard_matrix)$value
+
+heatmap_data$CellGroup1 <- factor(heatmap_data$CellGroup1, levels = (paste(celltypes_groups$celltype, celltypes_groups$group, sep = "_")))
+heatmap_data$CellGroup2 <- factor(heatmap_data$CellGroup2, levels = rev(paste(celltypes_groups$celltype, celltypes_groups$group, sep = "_")))
+
+p <- ggplot(heatmap_data, aes(x = CellGroup1, y = CellGroup2, fill = JaccardIndex)) +
+    geom_tile() +
+    geom_text(aes(label = round(JaccardIndex, 2)), color = "white", size = 3) +
+    scale_fill_viridis_c(option = "viridis", name = "Jaccard Index") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(title = "Heatmap of Jaccard Index for Common Peak-Gene Pairs", x = "Cell-Group Pair 1", y = "Cell-Group Pair 2") +
+    
+    geom_vline(xintercept = cumsum(rev(table(celltypes_groups$group))) + 0.5, color = "white", linetype = "dashed") +
+    geom_hline(yintercept = cumsum(table(celltypes_groups$group)) + 0.5, color = "white", linetype = "dashed") +
+    
+    geom_tile(data = subset(heatmap_data, as.numeric(CellGroup1) + as.numeric(CellGroup2) < dim(celltypes_groups)[1]+1), fill = "white", color = "white")
+
+heatmap_file <- file.path(plot_dir, "heatmap_common_peak_gene_pairs.jpg")
+ggsave(heatmap_file, plot = p, width = 10, height = 8)
+```
+
+```{r}
+library(dplyr)
+scent_results_signif_mature <- scent_results_signif[scent_results_signif$celltype == "EN-Mature", ]
+scent_results_signif_mature$group <- factor(scent_results_signif_mature$group, levels = groups)
+beta_tracking <- scent_results_signif_mature %>%
+    dplyr::select(peak_gene_pair, group, beta) %>%
+    tidyr::spread(key = group, value = beta, fill = 0)
+head(beta_tracking)
+
+beta_matrix <- as.matrix(beta_tracking[, -1]) 
+rownames(beta_matrix) <- beta_tracking$peak_gene_pair
+
+sil_width <- numeric(10)
+for (k in 6:10) {
+    print(k)
+    pam_fit <- pam(beta_matrix, k = k)
+    sil_width[k] <- pam_fit$silinfo$avg.width
+}
+optimal_k <- which.max(sil_width)
+
+optimal_k <- 4
+
+pam_fit <- pam(beta_matrix, k = optimal_k)
+beta_tracking$cluster <- pam_fit$clustering
+
+centroids <- aggregate(beta_matrix, by = list(cluster = beta_tracking$cluster), FUN = mean)
+centroids_long <- reshape2::melt(centroids, id.vars = "cluster", variable.name = "group", value.name = "beta")
+
+p <- ggplot(centroids_long, aes(x = group, y = beta, color = factor(cluster), group = cluster)) +
+    geom_line(size = 1) +
+    geom_point(size = 2) +
+    scale_color_viridis_d(name = "Cluster") +
+    theme_minimal() +
+    labs(title = "Cluster Centroids of Beta Trajectories", x = "Group", y = "Beta") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+centroid_plot_file <- file.path(plot_dir, "cluster_centroids_beta_trajectories.jpg")
+ggsave(centroid_plot_file, plot = p, width = 8, height = 6)
+```
+
+# gene ontology analysis of gene-enhancer pairs which are differentially active in each group
+
+# see whether any genes have multiple peaks with different activation patterns
+
+```{r}
+# marker proportions across celltypes
+group <- "Second_trimester"
+
+marker_proportions <- list()
+for (celltype in unique(celltypes_groups[, "celltype"])) {
+    marker_hits <- data.frame(marker = celltype_markers[[celltype]],
+
+    for (celltype in unique(celltypes_groups[, "celltype"])) {
+        data <- scent_results[[celltype]][[group]]
+
+    marker_proportions[[celltype]] <- sapply(markers, function(gene) {
+        data <- scent_results[[celltype]][[group]]
+        gene_data <- data[data$gene == gene, ]
+        prop_significant <- sum(gene_data$p_val_adj < 0.01) / nrow(gene_data)
+        return(prop_significant)
+    })
+}
+```
+
+```{r}
+# volcano plots
+directory <- file.path(plot_dir, "volcanos"); if (!dir.exists(directory)) { dir.create(directory, recursive = TRUE) }
+for (celltype in unique(celltypes_groups[, "celltype"])) {
+    for (group in unique(celltypes_groups[celltypes_groups$celltype == celltype, "group"])) {
+        data <- scent_results[[celltype]][[group]]
+        data$log_fdr <- -log10(data$p_val_adj)
+        jpeg(file = file.path(directory, paste0(celltype, "_", group, ".jpg")))
+        plot(data$beta, data$log_fdr, 
+             xlab = "Beta", 
+             ylab = "-log10(p_val_adj)", 
+             main = paste("Volcano Plot:", celltype, group),
+             pch = 20, 
+             col = ifelse(data$gene %in% celltype_markers[[celltype]], "blue", "black"))
+        abline(h = -log10(0.05), col = "red", lty = 2)
+        dev.off()
+    }
+}
+```

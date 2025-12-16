@@ -1,0 +1,74 @@
+```{r}
+library(SCENT)
+library(Seurat)
+library(Signac)
+
+base <- "/media/chang/HDD-8/joseph/bmi206/wangDev"
+genebed_loc <- file.path(base, "../GeneBody_500kb_margin.bed")
+
+notebook_dir <- file.path("/home/joseph/R/bmi206/joseph")
+
+seurat_en_lineage <- readRDS(file.path(base, "seurat_wang_multiome_en_lineage_processed.rds"))
+
+groups <- c("First_trimester", "Second_trimester", "Third_trimester", "Infancy", "Adolescence")
+celltypes <- c("Radial glia", "IPC-EN", "EN-Newborn", "EN-Immature", "EN-Mature")
+```
+
+# subset to marker genes
+```{r}
+marker_genes <- c()
+n <- 50
+
+for (group in unique(groups)) {
+    group_markers <- read.csv(file.path(notebook_dir, "plots", "wang", "markers", paste0("top_", n, "_", group, "_markers.csv")))
+    marker_genes <- unique(c(marker_genes, group_markers$gene))
+}
+
+for (celltype in unique(celltypes)) {
+    celltype_markers <- read.csv(file.path(notebook_dir, "plots", "wang", "markers", paste0("top_", n, "_", celltype, "_markers.csv")))
+    marker_genes <- unique(c(marker_genes, celltype_markers$gene))
+}
+
+length(marker_genes)
+```
+
+```{r}
+for (group in groups) {
+    print(group)
+    seurat_obj <- subset(seurat_en_lineage, Group == group)
+    if (group %in% c("Infancy", "Adolescence")) {
+        seurat_obj <- subset(seurat_obj, celltype %in% c("EN-Newborn", "EN-Immature", "EN-Mature"))
+    }
+
+    # subset to marker genes
+    seurat_obj[["RNA"]] <- subset(seurat_obj[["RNA"]], features = marker_genes)
+
+    atac <- GetAssayData(seurat_obj, assay = "ATAC", slot = "counts")
+    mrna <- GetAssayData(seurat_obj, assay = "RNA", slot = "counts")
+
+    meta <- data.frame(
+        cell = colnames(seurat_obj),
+        percent.mito = seurat_obj$percent.mt,
+        log_nUMI = log1p(seurat_obj$nCount_RNA),
+        batch = seurat_obj$Ident,
+        celltypes = as.character(seurat_obj$celltype)
+    )
+
+    covariates <- c("log_nUMI","percent.mito","batch")
+    celltypes <- as.character(seurat_obj$celltype)
+
+    SCENT_obj <- CreateSCENTObj(rna = mrna, atac = atac, meta.data = meta,
+                                covariates = covariates, celltypes = celltypes)
+
+    SCENT_obj <- CreatePeakToGeneList(SCENT_obj, genebed = genebed_loc, nbatch = 10, tmpfile=file.path(base, "temporary_atac_peak.bed"),
+                                      intersectedfile=file.path(base, "temporary_atac_peak_intersected.bed.gz"))
+
+    saveRDS(SCENT_obj, file = file.path(base, paste0("SCENT_obj_wang_", group, ".rds")))
+}
+```
+
+```{r}
+# library(SeuratDisk)
+# seurat_adult_brain <- LoadH5Seurat("/media/chang/HDD-8/joseph/bmi206/wangDev/GSE193240_brain.h5Seurat")
+# saveRDS(seurat_adult_brain, file = file.path(base, "seurat_adult_brain.rds"))
+```

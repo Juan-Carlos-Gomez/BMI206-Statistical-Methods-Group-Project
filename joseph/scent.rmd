@@ -22,12 +22,15 @@ mrna <- GetAssayData(seurat_obj, assay = "RNA", slot = "counts")
 dim(mrna)
 inherits(mrna, "sparseMatrix")
 
+head(seurat_obj@meta.data)
+
 meta <- data.frame(
     cell = colnames(seurat_obj),
-    # percent.mito = seurat_obj$percent.mito,
-    log_nUMI = log1p(seurat_obj$nCount_RNA)
+    percent.mito = seurat_obj$GEX_pct_counts_mt,
+    log_nUMI = log1p(seurat_obj$nCount_RNA),
     # sample = seurat_obj$Samplename,
-    # batch = seurat_obj$batch
+    batch = seurat_obj$batch,
+    celltypes = seurat_obj$cell_type
 )
 
 covariates <- c("log_nUMI") # minimum
@@ -54,7 +57,7 @@ str(SCENT_obj)
 
 ```{r}
 SCENT_obj <- CreatePeakToGeneList(SCENT_obj, genebed = genebed_loc,
-                                  nbatch = 1000, tmpfile=file.path(base, "temporary_atac_peak.bed"),
+                                  nbatch = 1, tmpfile=file.path(base, "temporary_atac_peak.bed"),
                                   intersectedfile=file.path(base, "temporary_atac_peak_intersected.bed.gz"))
 str(SCENT_obj)
 

@@ -1,0 +1,157 @@
+```{r}
+utils <- "/home/joseph/R/utils.r"
+source(utils)
+library(Signac)
+library(Seurat)
+library(dplyr)
+
+base <- "/media/chang/HDD-8/joseph/bmi206/wangDev"
+notebook_dir <- file.path("/home/joseph/R/bmi206/joseph")
+dataset <- "wang"
+```
+
+```{r}
+filename <- "snMultiome_atlas_Seurat_object.rds"
+seurat_obj <- readRDS(file.path(base, filename))
+seurat_obj[["ATAC"]] <- NULL
+seurat_obj[["SCT"]] <- NULL
+seurat_obj[["integrated"]] <- NULL
+
+seurat_rg <- subset(seurat_obj, subclass == "Radial glia")
+seurat_ipc <- subset(seurat_obj, subclass == "IPC-EN")
+seurat_en <- subset(seurat_obj, subclass == "Glutamatergic neuron")
+
+saveRDS(seurat_rg, file.path(base, "seurat_wang_multiome_rg.rds"))
+saveRDS(seurat_ipc, file.path(base, "seurat_wang_multiome_ipc.rds"))
+saveRDS(seurat_en, file.path(base, "seurat_wang_multiome_en.rds"))
+
+seurat_en_lineage <- subset(seurat_obj, subclass %in% c("Glutamatergic neuron", "IPC-EN", "Radial glia"))
+saveRDS(seurat_en_lineage, file.path(base, "seurat_wang_rna_en_lineage.rds"))
+
+seurat_en_lineage_t1 <- subset(seurat_en_lineage, Group == "First_trimester")
+seurat_en_lineage_t2 <- subset(seurat_en_lineage, Group == "Second_trimester")
+seurat_en_lineage_t3 <- subset(seurat_en_lineage, Group == "Third_trimester")
+seurat_en_lineage_inf <- subset(seurat_en_lineage, Group == "Infancy")
+seurat_en_lineage_ado <- subset(seurat_en_lineage, Group == "Adolescence")
+
+saveRDS(seurat_en_lineage_t1, file.path(base, "seurat_wang_multiome_en_lineage_t1.rds"))
+saveRDS(seurat_en_lineage_t2, file.path(base, "seurat_wang_multiome_en_lineage_t2.rds"))
+saveRDS(seurat_en_lineage_t3, file.path(base, "seurat_wang_multiome_en_lineage_t3.rds"))
+saveRDS(seurat_en_lineage_inf, file.path(base, "seurat_wang_multiome_en_lineage_inf.rds"))
+saveRDS(seurat_en_lineage_ado, file.path(base, "seurat_wang_multiome_en_lineage_ado.rds"))
+
+seurat_en_lineage <- readRDS(file.path(base, "seurat_wang_multiome_en_lineage.rds"))
+
+seurat_en_lineage[["ATAC"]] <- NULL
+seurat_en_lineage[["SCT"]] <- NULL
+seurat_en_lineage[["integrated"]] <- NULL
+
+mito_genes <- grep("^MT-", rownames(seurat_en_lineage), value = TRUE)
+ribo_genes <- grep("^RPL|^RPS", rownames(seurat_en_lineage), value = TRUE)
+seurat_en_lineage[["RNA"]] <- subset(seurat_en_lineage[["RNA"]], features = setdiff(rownames(seurat_en_lineage[["RNA"]]), c(mito_genes, ribo_genes)))
+
+seurat_en_lineage$celltype <- seurat_en_lineage$subclass
+seurat_en_lineage$celltype[seurat_en_lineage$type_updated %in% c("EN-Newborn")] <- "EN-Newborn"
+seurat_en_lineage$celltype[seurat_en_lineage$type_updated %in% c("EN-IT-Immature", "EN-Non-IT-Immature")] <- "EN-Immature"
+seurat_en_lineage$celltype[seurat_en_lineage$celltype == "Glutamatergic neuron"] <- "EN-Mature"
+seurat_en_lineage$celltype <- factor(seurat_en_lineage$celltype, levels = c("Radial glia", "IPC-EN", "EN-Newborn", "EN-Immature", "EN-Mature"))
+
+seurat_en_lineage$Group <- factor(seurat_en_lineage$Group, levels = c("First_trimester", "Second_trimester", "Third_trimester", "Infancy", "Adolescence"))
+
+for (group in levels(seurat_en_lineage$Group)) {
+  print(group)
+  print(table(seurat_en_lineage$celltype[seurat_en_lineage$Group == group]))
+}
+
+saveRDS(seurat_en_lineage, file.path(base, "seurat_wang_multiome_en_lineage_processed.rds"))
+```
+
+```{r}
+seurat_en_lineage <- readRDS(file.path(base, "seurat_wang_rna_en_lineage.rds"))
+
+data_subset <- paste("markers", sep="/")
+directory <- file.path(notebook_dir, "plots", dataset, data_subset); if (!dir.exists(directory)) {dir.create(directory, recursive = TRUE)}
+
+compute_markers_sig <- function(obj, group.by, p_val_adj_min, subset, logfc.threshold=1, min.pct=0.1) {
+
+  markers <- get_top_markers(obj, group.by=group.by, only.pos=TRUE, logfc.threshold=logfc.threshold, min.pct=min.pct)
+
+  markers_sig <- markers %>% filter(p_val_adj < p_val_adj_min) %>% group_by(cluster) %>% arrange(desc(score), .by_group = TRUE)
+
+  write.csv(markers_sig, file = file.path(directory, paste0(subset, "_markers.csv")), row.names = FALSE)
+
+  n <- 50
+  markers_top <- markers_sig %>% arrange(desc(score)) %>% slice_head(n = n)
+  write.csv(markers_top, file = file.path(directory, paste0("top_", n, "_", subset, "_markers.csv")), row.names = FALSE)
+
+  return(markers_top)
+}
+
+# union of markers across cell types for each developing age group
+for (group in levels(seurat_en_lineage$Group)) {
+  group <- "Second_trimester"
+  print(group)
+
+  seurat_en_lineage_group <- subset(seurat_en_lineage, Group == group)
+  if (group %in% c("Infancy", "Adolescence")) {
+    seurat_en_lineage_group <- subset(seurat_en_lineage_group, celltype %in% c("EN-Newborn", "EN-Immature", "EN-Mature"))
+  }
+
+  Idents(seurat_en_lineage_group) <- seurat_en_lineage_group$celltype
+
+  top_markers_sig <- compute_markers_sig(obj=seurat_en_lineage_group, group.by="celltype", subset=group, p_val_adj_min=0.01)
+
+  seurat_heatmap <- subset(seurat_en_lineage_group, cells = sample(Cells(seurat_en_lineage_group), size = min(1000, ncol(seurat_en_lineage_group))))
+  seurat_heatmap <- ScaleData(seurat_heatmap, features=top_markers_sig$gene)
+
+  p <- DoHeatmap(seurat_heatmap, features = top_markers_sig$gene, group.by="celltype") + theme(axis.text.y = element_blank())
+  ggsave(filename = file.path(directory, paste0("heatmap_", group, "_markers.png")), plot = p, width = 12, height = 16)
+}
+
+# union of markers across relevant age groups for each cell type
+for (celltype in c("Radial glia", "IPC-EN", "EN-Newborn", "EN-Immature", "EN-Mature")) {
+  print(celltype)
+
+  seurat_en_lineage_group <- subset(seurat_en_lineage, celltype == celltype)
+
+  if (celltype %in% c("Radial glia", "IPC-EN")) {
+    seurat_en_lineage_group <- subset(seurat_en_lineage_group, Group %in% c("First_trimester", "Second_trimester", "Third_trimester"))
+  }
+  Idents(seurat_en_lineage_group) <- seurat_en_lineage_group$Group
+
+  top_markers_sig <- compute_markers_sig(obj=seurat_en_lineage_group, group.by="Group", subset=celltype, p_val_adj_min=0.01)
+
+  seurat_heatmap <- subset(seurat_en_lineage_group, cells = sample(Cells(seurat_en_lineage_group), size = min(1000, ncol(seurat_en_lineage_group))))
+  seurat_heatmap <- ScaleData(seurat_heatmap, features=top_markers_sig$gene)
+  seurat_heatmap$Group <- factor(seurat_heatmap$Group, levels=c("First_trimester", "Second_trimester", "Third_trimester", "Infancy", "Adolescence"))
+
+  p <- DoHeatmap(seurat_heatmap, features = top_markers_sig$gene, group.by="Group") + NoLegend()
+  ggsave(filename = file.path(directory, paste0("heatmap_", celltype, "_markers.png")), plot = p, width = 12, height = 16)
+}
+
+```
+
+```{r}
+library(dplyr)
+directory <- file.path(notebook_dir, "plots", "wang")
+
+cell_counts <- seurat_en_lineage@meta.data %>%
+  dplyr::group_by(Group, celltype) %>%
+  summarise(count = n(), .groups = "drop")
+
+p <- ggplot(cell_counts, aes(x = Group, y = count, fill = celltype)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Age Group",
+       y = "Number of Cells",
+       fill = "Cell Type") +
+  theme_minimal(base_size = 16) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 14),
+        axis.text.y = element_text(size = 14),
+        axis.title = element_text(size = 16),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 16),
+        panel.grid = element_blank())
+
+ggsave(filename = file.path(directory, "celltype_counts_barplot.png"), plot = p, width = 10, height = 6)
+
+```
